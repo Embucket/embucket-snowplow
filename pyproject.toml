@@ -1,0 +1,9 @@
+[project]
+name = "embucket-example"
+version = "0.1.0"
+description = "Embucket demo: Snowplow web analytics with dbt"
+requires-python = ">=3.10"
+dependencies = [
+    "dbt-core>=1.11.0,<2.0",
+    "dbt-embucket>=0.1.2",
+]
