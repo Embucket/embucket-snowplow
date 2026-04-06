@@ -93,7 +93,13 @@ def main():
         print(f"  {sql}")
         run_sql(client, fn, token, sql)
 
-    # Create events table
+    # Drop and recreate events table (to pick up schema changes)
+    print("Dropping existing events table (if any)...")
+    try:
+        run_sql(client, fn, token, "DROP TABLE IF EXISTS demo.atomic.events")
+    except RuntimeError:
+        pass  # Table may not exist
+
     create_sql = (scripts_dir / "create_table.sql").read_text().strip()
     print("Creating events table...")
     run_sql(client, fn, token, create_sql)
