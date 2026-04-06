@@ -12,6 +12,12 @@ Run the full [dbt-snowplow-web](https://hub.getdbt.com/snowplow/snowplow_web/lat
 
 ## Quick Start
 
+Set your S3 Table Bucket ARN:
+
+```bash
+BUCKET_ARN="arn:aws:s3tables:us-east-2:YOUR_ACCOUNT:bucket/YOUR_BUCKET"
+```
+
 ### 1. Deploy Embucket Lambda
 
 ```bash
@@ -20,15 +26,16 @@ aws cloudformation deploy \
   --stack-name embucket-demo \
   --capabilities CAPABILITY_NAMED_IAM \
   --region us-east-2 \
-  --parameter-overrides S3TableBucketArn=YOUR_TABLE_BUCKET_ARN
+  --parameter-overrides S3TableBucketArn=$BUCKET_ARN
 ```
 
 Grab the Lambda ARN:
 
 ```bash
-aws cloudformation describe-stacks --stack-name embucket-demo \
+LAMBDA_ARN=$(aws cloudformation describe-stacks --stack-name embucket-demo \
   --query 'Stacks[0].Outputs[?OutputKey==`LambdaFunctionArn`].OutputValue' \
-  --output text --region us-east-2
+  --output text --region us-east-2)
+echo $LAMBDA_ARN
 ```
 
 ### 2. Install dbt
@@ -41,9 +48,8 @@ pip install dbt-core dbt-embucket
 
 ```bash
 cp profiles.yml.example profiles.yml
+sed -i'' -e "s|YOUR_LAMBDA_ARN_HERE|$LAMBDA_ARN|" profiles.yml
 ```
-
-Edit `profiles.yml` and replace `YOUR_LAMBDA_ARN_HERE` with the ARN from step 1.
 
 ### 4. Install dbt packages
 
@@ -55,12 +61,20 @@ dbt deps
 ### 5. Load source data
 
 ```bash
-python scripts/load_data.py YOUR_LAMBDA_ARN_HERE
+python scripts/load_data.py $LAMBDA_ARN
 ```
 
-Replace `YOUR_LAMBDA_ARN_HERE` with the ARN from step 1. This creates the required schemas, the `atomic.events` table, and loads ~28 MB of synthetic Snowplow web event data.
+This creates the required schemas, the `atomic.events` table, and loads ~28 MB of synthetic Snowplow web event data.
 
-### 6. Run the models
+### 6. Load seed data
+
+```bash
+dbt seed
+```
+
+This loads reference tables used by the Snowplow models (GA4 source categories, geo mappings, language mappings).
+
+### 7. Run the models
 
 ```bash
 dbt run
@@ -68,12 +82,12 @@ dbt run
 
 This builds the full Snowplow web analytics pipeline: page views, sessions, and users.
 
-### 7. Query the results
+### 8. Query the results
 
 ```bash
-dbt show --inline "SELECT * FROM demo.atomic.snowplow_web_page_views LIMIT 10"
-dbt show --inline "SELECT * FROM demo.atomic.snowplow_web_sessions LIMIT 10"
-dbt show --inline "SELECT * FROM demo.atomic.snowplow_web_users LIMIT 10"
+dbt show --inline "SELECT * FROM demo.atomic_derived.snowplow_web_page_views LIMIT 10"
+dbt show --inline "SELECT * FROM demo.atomic_derived.snowplow_web_sessions LIMIT 10"
+dbt show --inline "SELECT * FROM demo.atomic_derived.snowplow_web_users LIMIT 10"
 ```
 
 ## Cleanup
