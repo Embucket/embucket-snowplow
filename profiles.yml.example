@@ -1,0 +1,12 @@
+embucket_demo:
+  target: dev
+  outputs:
+    dev:
+      type: embucket
+      function_arn: "YOUR_LAMBDA_ARN_HERE"
+      account: "embucket"
+      user: "embucket"
+      password: "embucket"
+      database: "demo"
+      schema: "atomic"
+      threads: 1
