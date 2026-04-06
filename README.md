@@ -12,9 +12,10 @@ Run the full [dbt-snowplow-web](https://hub.getdbt.com/snowplow/snowplow_web/lat
 
 ## Quick Start
 
-Set your S3 Table Bucket ARN:
+Set your variables:
 
 ```bash
+STACK_NAME="embucket-demo-$(whoami)-$(date +%s)"
 BUCKET_ARN="arn:aws:s3tables:us-east-2:YOUR_ACCOUNT:bucket/YOUR_BUCKET"
 ```
 
@@ -23,7 +24,7 @@ BUCKET_ARN="arn:aws:s3tables:us-east-2:YOUR_ACCOUNT:bucket/YOUR_BUCKET"
 ```bash
 aws cloudformation deploy \
   --template-file deploy/embucket-lambda.cfn.yaml \
-  --stack-name embucket-demo \
+  --stack-name $STACK_NAME \
   --capabilities CAPABILITY_NAMED_IAM \
   --region us-east-2 \
   --parameter-overrides S3TableBucketArn=$BUCKET_ARN
@@ -32,7 +33,7 @@ aws cloudformation deploy \
 Grab the Lambda ARN:
 
 ```bash
-LAMBDA_ARN=$(aws cloudformation describe-stacks --stack-name embucket-demo \
+LAMBDA_ARN=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
   --query 'Stacks[0].Outputs[?OutputKey==`LambdaFunctionArn`].OutputValue' \
   --output text --region us-east-2)
 echo $LAMBDA_ARN
@@ -66,23 +67,16 @@ python scripts/load_data.py $LAMBDA_ARN
 
 This creates the required schemas, the `atomic.events` table, and loads ~28 MB of synthetic Snowplow web event data.
 
-### 6. Load seed data
+### 6. Load seeds and run the models
 
 ```bash
 dbt seed
-```
-
-This loads reference tables used by the Snowplow models (GA4 source categories, geo mappings, language mappings).
-
-### 7. Run the models
-
-```bash
 dbt run
 ```
 
-This builds the full Snowplow web analytics pipeline: page views, sessions, and users.
+This loads reference tables (GA4 source categories, geo/language mappings) and builds the full Snowplow web analytics pipeline: page views, sessions, and users.
 
-### 8. Query the results
+### 7. Query the results
 
 ```bash
 dbt show --inline "SELECT * FROM demo.atomic_derived.snowplow_web_page_views LIMIT 10"
@@ -93,7 +87,7 @@ dbt show --inline "SELECT * FROM demo.atomic_derived.snowplow_web_users LIMIT 10
 ## Cleanup
 
 ```bash
-aws cloudformation delete-stack --stack-name embucket-demo --region us-east-2
+aws cloudformation delete-stack --stack-name $STACK_NAME --region us-east-2
 ```
 
 ## How it works
