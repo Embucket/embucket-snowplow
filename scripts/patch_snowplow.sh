@@ -5,6 +5,6 @@ set -euo pipefail
 
 find dbt_packages -name '*.sql' -o -name '*.yml' | \
   xargs grep -rl "target\.type == 'snowflake'" 2>/dev/null | \
-  xargs sed -i'' -e "s/target\.type == 'snowflake'/target.type in ['snowflake', 'embucket']/g"
+  xargs sed -i '' "s/target\.type == 'snowflake'/target.type in ['snowflake', 'embucket']/g"
 
 echo "Patched dbt_packages for embucket compatibility."
