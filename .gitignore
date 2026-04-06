@@ -11,9 +11,10 @@ venv/
 
 # Config with secrets
 profiles.yml
+profiles.yml-e
 
 # OS
 .DS_Store
 
-# Docs (internal)
-docs/superpowers/
+# Internal docs
+docs/

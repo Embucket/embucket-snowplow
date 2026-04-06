@@ -35,7 +35,7 @@ def login(client, fn):
         "body": json.dumps({"data": {
             "LOGIN_NAME": "demo_user", "PASSWORD": "demo_password_2026",
             "CLIENT_APP_ID": "setup", "CLIENT_APP_VERSION": "1.0",
-            "ACCOUNT_NAME": "test", "CLIENT_ENVIRONMENT": {}, "SESSION_PARAMETERS": {},
+            "ACCOUNT_NAME": "embucket", "CLIENT_ENVIRONMENT": {}, "SESSION_PARAMETERS": {},
         }}),
         "isBase64Encoded": False,
     })

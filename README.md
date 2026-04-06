@@ -99,7 +99,8 @@ uv run dbt show --profiles-dir . --inline "SELECT * FROM demo.atomic_derived.sno
 Delete the CloudFormation stack (Lambda, IAM role, DynamoDB table):
 
 ```bash
-aws cloudformation delete-stack --stack-name $STACK_NAME```
+aws cloudformation delete-stack --stack-name $STACK_NAME
+```
 
 > **Note:** This does not delete data in your S3 Table Bucket. Iceberg tables created by Embucket persist there until you remove them manually.
 
