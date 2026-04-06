@@ -49,16 +49,16 @@ Edit `profiles.yml` and replace `YOUR_LAMBDA_ARN_HERE` with the ARN from step 1.
 
 ```bash
 dbt deps
+./scripts/patch_snowplow.sh
 ```
 
 ### 5. Load source data
 
 ```bash
-dbt show --inline "$(cat scripts/create_table.sql)"
-dbt show --inline "$(cat scripts/copy_data.sql)"
+python scripts/load_data.py YOUR_LAMBDA_ARN_HERE
 ```
 
-This creates the `atomic.events` table and loads ~28 MB of synthetic Snowplow web event data.
+Replace `YOUR_LAMBDA_ARN_HERE` with the ARN from step 1. This creates the required schemas, the `atomic.events` table, and loads ~28 MB of synthetic Snowplow web event data.
 
 ### 6. Run the models
 

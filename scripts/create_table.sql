@@ -1,6 +1,3 @@
-CREATE DATABASE IF NOT EXISTS demo;
-CREATE SCHEMA IF NOT EXISTS demo.atomic;
-
 CREATE TABLE IF NOT EXISTS demo.atomic.events (
     app_id VARCHAR,
     platform VARCHAR,
