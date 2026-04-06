@@ -1,0 +1,19 @@
+# dbt
+target/
+dbt_packages/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Config with secrets
+profiles.yml
+
+# OS
+.DS_Store
+
+# Docs (internal)
+docs/superpowers/
