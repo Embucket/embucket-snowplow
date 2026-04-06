@@ -5,8 +5,8 @@ embucket_demo:
       type: embucket
       function_arn: "YOUR_LAMBDA_ARN_HERE"
       account: "embucket"
-      user: "embucket"
-      password: "embucket"
+      user: "demo_user"
+      password: "demo_password_2026"
       database: "demo"
       schema: "atomic"
       threads: 1

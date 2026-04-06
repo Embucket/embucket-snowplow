@@ -33,7 +33,7 @@ def login(client, fn):
         },
         "headers": {"content-type": "application/json", "host": "localhost", "x-forwarded-for": "127.0.0.1"},
         "body": json.dumps({"data": {
-            "LOGIN_NAME": "embucket", "PASSWORD": "embucket",
+            "LOGIN_NAME": "demo_user", "PASSWORD": "demo_password_2026",
             "CLIENT_APP_ID": "setup", "CLIENT_APP_VERSION": "1.0",
             "ACCOUNT_NAME": "test", "CLIENT_ENVIRONMENT": {}, "SESSION_PARAMETERS": {},
         }}),

@@ -16,6 +16,17 @@ Parameters:
     Default: lambda/embucket-lambda-latest.zip
     Description: S3 key for the Lambda zip artifact
 
+  EmbucketUser:
+    Type: String
+    Default: demo_user
+    Description: Embucket login username
+
+  EmbucketPassword:
+    Type: String
+    Default: demo_password_2026
+    NoEcho: true
+    Description: Embucket login password
+
 Resources:
   # DynamoDB table for Embucket state store
   StateStoreTable:
@@ -119,6 +130,8 @@ Resources:
           VOLUME_TYPE: s3tables
           VOLUME_DATABASE: demo
           VOLUME_ARN: !Ref S3TableBucketArn
+          AUTH_DEMO_USER: !Ref EmbucketUser
+          AUTH_DEMO_PASSWORD: !Ref EmbucketPassword
           JWT_SECRET: secret
           LOG_FORMAT: json
           MEM_POOL_TYPE: greedy
