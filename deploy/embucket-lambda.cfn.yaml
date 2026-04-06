@@ -122,7 +122,7 @@ Resources:
           JWT_SECRET: secret
           LOG_FORMAT: json
           MEM_POOL_TYPE: greedy
-          MEM_POOL_SIZE_MB: '8192'
+          MEM_POOL_SIZE_MB: '2048'
           QUERY_TIMEOUT_SECS: '240'
           STATESTORE_TABLE_NAME: !Ref StateStoreTable
 
