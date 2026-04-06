@@ -109,7 +109,7 @@ Resources:
       Code:
         S3Bucket: !Ref LambdaArtifactBucket
         S3Key: !Ref LambdaArtifactKey
-      MemorySize: 10240
+      MemorySize: 3008
       Timeout: 300
       Role: !GetAtt LambdaExecutionRole.Arn
       Environment:
