@@ -1,0 +1,15 @@
+name: 'embucket_snowplow_demo'
+version: '0.1.0'
+config-version: 2
+require-dbt-version: [">=1.6.0", "<2.0.0"]
+
+profile: 'embucket_demo'
+
+dispatch:
+  - macro_namespace: dbt
+    search_order: ['snowplow_utils', 'dbt']
+
+vars:
+  snowplow__start_date: '2025-09-13'
+  snowplow__events: "{{ source('atomic', 'events') }}"
+  snowplow__atomic_schema: 'atomic'
