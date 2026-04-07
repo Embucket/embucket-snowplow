@@ -1,4 +1,4 @@
-# Embucket Demo: Snowplow Web Analytics with dbt
+# Snowplow Web Analytics with dbt
 
 [Embucket](https://github.com/Embucket/embucket) is a Snowflake-compatible query engine built on Apache DataFusion and Apache Iceberg. This demo runs the full [dbt-snowplow-web](https://hub.getdbt.com/snowplow/snowplow_web/latest/) analytics pipeline on Embucket deployed as an AWS Lambda — no Snowflake account required.
 
