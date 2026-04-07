@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Run all 22 TPC-H queries against Embucket Lambda and report results.
+"""Run all 22 TPC-H queries against Embucket Lambda via dbt show --inline.
 
 Usage:
     python scripts/tpch/run_tpch_queries.py <lambda_function_arn>
 
 Assumes TPC-H tables have been loaded into demo.tpch schema
-via load_tpch_data.py.
+via load_tpch_data.py. Creates a temporary profiles.yml pointing
+to the given Lambda, then runs each query via `dbt show --inline`.
 """
-import boto3
-import json
+import os
+import subprocess
 import sys
+import tempfile
 import time
-import uuid
 
 # All 22 standard TPC-H queries against demo.tpch.* tables
 TPCH_QUERIES = [
@@ -453,56 +454,53 @@ TPCH_QUERIES = [
 ]
 
 
-def invoke(client, fn, payload):
-    resp = client.invoke(FunctionName=fn, Payload=json.dumps(payload))
-    raw = resp["Payload"].read()
-    if resp.get("FunctionError"):
-        raise RuntimeError(f"Lambda error: {raw.decode()[:300]}")
-    return json.loads(raw) if raw else {}
+def setup_profiles(fn, project_dir):
+    """Create a profiles.yml in the project directory pointing to the Lambda."""
+    profiles = f"""embucket_demo:
+  target: dev
+  outputs:
+    dev:
+      type: embucket
+      function_arn: "{fn}"
+      account: "embucket"
+      user: "demo_user"
+      password: "demo_password_2026"
+      database: "demo"
+      schema: "tpch"
+      threads: 1
+"""
+    path = os.path.join(project_dir, "profiles.yml")
+    with open(path, "w") as f:
+        f.write(profiles)
+    return path
 
 
-def login(client, fn):
-    result = invoke(client, fn, {
-        "version": "2.0",
-        "rawPath": "/session/v1/login-request",
-        "rawQueryString": "",
-        "requestContext": {
-            "http": {"method": "POST", "path": "/session/v1/login-request", "sourceIp": "127.0.0.1"},
-            "accountId": "anonymous", "apiId": "anonymous",
-        },
-        "headers": {"content-type": "application/json", "host": "localhost", "x-forwarded-for": "127.0.0.1"},
-        "body": json.dumps({"data": {
-            "LOGIN_NAME": "demo_user", "PASSWORD": "demo_password_2026",
-            "CLIENT_APP_ID": "tpch-runner", "CLIENT_APP_VERSION": "1.0",
-            "ACCOUNT_NAME": "embucket", "CLIENT_ENVIRONMENT": {}, "SESSION_PARAMETERS": {},
-        }}),
-        "isBase64Encoded": False,
-    })
-    return json.loads(result["body"])["data"]["token"]
+def extract_limit(sql):
+    """Extract and remove trailing LIMIT N from SQL, returning (sql_without_limit, limit_value)."""
+    import re
+    match = re.search(r'\bLIMIT\s+(\d+)\s*$', sql.strip(), re.IGNORECASE)
+    if match:
+        limit_val = int(match.group(1))
+        sql_clean = sql[:match.start()].rstrip()
+        return sql_clean, limit_val
+    return sql, None
 
 
-def run_sql(client, fn, token, sql):
-    result = invoke(client, fn, {
-        "version": "2.0",
-        "rawPath": "/queries/v1/query-request",
-        "rawQueryString": f"requestId={uuid.uuid4()}",
-        "requestContext": {
-            "http": {"method": "POST", "path": "/queries/v1/query-request", "sourceIp": "127.0.0.1"},
-            "accountId": "anonymous", "apiId": "anonymous",
-        },
-        "headers": {
-            "content-type": "application/json",
-            "host": "localhost",
-            "x-forwarded-for": "127.0.0.1",
-            "authorization": f'Snowflake Token="{token}"',
-        },
-        "body": json.dumps({"sqlText": sql}),
-        "isBase64Encoded": False,
-    })
-    body = json.loads(result.get("body", "{}"))
-    if not body.get("success"):
-        raise RuntimeError(f"SQL failed: {body.get('message', 'unknown error')}")
-    return body
+def run_dbt_query(sql, project_dir):
+    """Run a SQL query via dbt show --inline and return (stdout, stderr, returncode)."""
+    clean_sql, limit = extract_limit(sql)
+    cmd = ["uv", "run", "dbt", "show", "--no-populate-cache", "--inline", clean_sql.strip()]
+    if limit is not None:
+        cmd.extend(["--limit", str(limit)])
+    else:
+        cmd.extend(["--limit", "-1"])
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        cwd=project_dir,
+    )
+    return result.stdout, result.stderr, result.returncode
 
 
 def main():
@@ -511,57 +509,57 @@ def main():
         sys.exit(1)
 
     fn = sys.argv[1]
-    region = "us-east-2"
-    if ":lambda:" in fn:
-        region = fn.split(":")[3]
+    project_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-    client = boto3.client("lambda", region_name=region)
+    print("Setting up dbt profile...")
+    profiles_path = setup_profiles(fn, project_dir)
+    print(f"  profiles.yml written to {profiles_path}")
 
-    print("Logging in...")
-    token = login(client, fn)
+    print(f"\n{'Query':<8} {'Status':<10} {'Time (s)':>10}")
+    print("-" * 32)
 
-    print(f"\n{'Query':<8} {'Status':<10} {'Time (s)':>10} {'Rows':>8}")
-    print("-" * 40)
-
-    results = []
     total_time = 0.0
     passed = 0
     failed = 0
+    failures = []
 
     for query_id, sql in TPCH_QUERIES:
         t0 = time.time()
-        try:
-            body = run_sql(client, fn, token, sql)
-            elapsed = time.time() - t0
-            data = body.get("data", {})
-            if isinstance(data, dict):
-                row_count = len(data.get("rowset", data.get("rows", [])))
-            else:
-                row_count = len(data)
+        stdout, stderr, rc = run_dbt_query(sql, project_dir)
+        elapsed = time.time() - t0
+
+        if rc == 0:
             status = "OK"
             passed += 1
-        except Exception as e:
-            elapsed = time.time() - t0
-            row_count = 0
+            total_time += elapsed
+        else:
             status = "FAIL"
             failed += 1
-            results.append((query_id, status, elapsed, row_count, str(e)[:80]))
-            print(f"{query_id:<8} {status:<10} {elapsed:>10.2f} {row_count:>8}")
-            continue
+            # Extract error message from combined output
+            all_output = stdout + stderr
+            err_lines = [l for l in all_output.splitlines() if "error" in l.lower()]
+            err_msg = err_lines[-1].strip() if err_lines else all_output.strip()[-120:]
+            failures.append((query_id, err_msg))
 
-        total_time += elapsed
-        results.append((query_id, status, elapsed, row_count, ""))
-        print(f"{query_id:<8} {status:<10} {elapsed:>10.2f} {row_count:>8}")
+        print(f"{query_id:<8} {status:<10} {elapsed:>10.2f}")
 
-    print("-" * 40)
+        # Print dbt output for each query
+        for line in stdout.splitlines():
+            if line.strip().startswith("|") or line.strip().startswith("+"):
+                print(f"  {line}")
+
+    print("-" * 32)
     print(f"{'Total':<8} {'':10} {total_time:>10.2f}")
     print(f"\nPassed: {passed}/22, Failed: {failed}/22")
 
-    if failed > 0:
+    if failures:
         print("\nFailed queries:")
-        for qid, status, _, _, err in results:
-            if status == "FAIL":
-                print(f"  {qid}: {err}")
+        for qid, err in failures:
+            print(f"  {qid}: {err}")
+
+    # Clean up the temporary profiles.yml
+    os.remove(profiles_path)
+    print(f"\nCleaned up {profiles_path}")
 
 
 if __name__ == "__main__":
