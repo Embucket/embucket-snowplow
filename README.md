@@ -13,8 +13,8 @@
 ## Quick Start
 
 ```bash
-git clone https://github.com/Embucket/embucket-example.git
-cd embucket-example
+git clone https://github.com/Embucket/embucket-snowplow.git
+cd embucket-snowplow
 ```
 
 Set your variables:
