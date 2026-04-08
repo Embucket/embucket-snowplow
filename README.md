@@ -1,12 +1,12 @@
 # Snowplow Web Analytics with dbt
 
-[Embucket](https://github.com/Embucket/embucket) is a Snowflake-compatible query engine built on Apache DataFusion and Apache Iceberg. This demo runs the full [dbt-snowplow-web](https://hub.getdbt.com/snowplow/snowplow_web/latest/) analytics pipeline on Embucket deployed as an AWS Lambda — no Snowflake account required.
+[Embucket](https://github.com/Embucket/embucket) is a Snowflake-compatible data engine based on Apache DataFusion and iceberg-rust. This repo is an example on how to run Snowflake flavour of [dbt-snowplow-web](https://hub.getdbt.com/snowplow/snowplow_web/latest/) pipeline on AWS Lambda with AWS S3 Tables as Iceberg data store
 
 ## Prerequisites
 
-- AWS account with permissions to create CloudFormation stacks (Lambda, IAM, DynamoDB, S3Tables)
-- An [AWS S3 Table Bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-buckets-create.html)
-- AWS CLI configured (`aws configure`)
+- Access to AWS account with permissions to create CloudFormation stacks: Lambda, IAM, DynamoDB, S3Tables
+- Access to [AWS S3 Table Bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-buckets-create.html)
+- AWS CLI configured (`aws configure`) locally 
 - [uv](https://docs.astral.sh/uv/) (or Python 3.10+ with pip)
 - Git
 
@@ -114,11 +114,11 @@ aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE \
 ## How it works
 
 ```
-dbt (your machine)
+dbt (your machine or dbt orchestrator)
   │
   │  boto3.invoke()
   ▼
-AWS Lambda (Embucket)
+AWS Lambda (embucket-lambda)
   │
   │  Apache Iceberg
   ▼
