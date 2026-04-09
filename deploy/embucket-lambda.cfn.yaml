@@ -1,31 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Embucket Lambda deployment for dbt demo
+Description: Embucket Lambda supporting infrastructure (IAM role + DynamoDB state store)
 
 Parameters:
   S3TableBucketArn:
     Type: String
     Description: ARN of your AWS S3 Table Bucket (e.g., arn:aws:s3tables:us-east-2:123456789:bucket/my-bucket)
-
-  LambdaArtifactBucket:
-    Type: String
-    Default: embucket-releases
-    Description: S3 bucket containing the Lambda zip artifact
-
-  LambdaArtifactKey:
-    Type: String
-    Default: lambda/embucket-lambda-latest.zip
-    Description: S3 key for the Lambda zip artifact
-
-  EmbucketUser:
-    Type: String
-    Default: demo_user
-    Description: Embucket login username
-
-  EmbucketPassword:
-    Type: String
-    Default: demo_password_2026
-    NoEcho: true
-    Description: Embucket login password
 
 Resources:
   # DynamoDB table for Embucket state store
@@ -108,42 +87,11 @@ Resources:
                   - !GetAtt StateStoreTable.Arn
                   - !Sub '${StateStoreTable.Arn}/index/*'
 
-  # Lambda function
-  EmbucketLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub 'embucket-demo-${AWS::StackName}'
-      Runtime: provided.al2023
-      Architectures:
-        - arm64
-      Handler: bootstrap
-      Code:
-        S3Bucket: !Ref LambdaArtifactBucket
-        S3Key: !Ref LambdaArtifactKey
-      MemorySize: 3008
-      Timeout: 300
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Environment:
-        Variables:
-          RUST_LOG: info
-          METASTORE_CONFIG: config/metastore.yaml
-          VOLUME_TYPE: s3tables
-          VOLUME_DATABASE: demo
-          VOLUME_ARN: !Ref S3TableBucketArn
-          AUTH_DEMO_USER: !Ref EmbucketUser
-          AUTH_DEMO_PASSWORD: !Ref EmbucketPassword
-          JWT_SECRET: secret
-          LOG_FORMAT: json
-          MEM_POOL_TYPE: greedy
-          MEM_POOL_SIZE_MB: '2048'
-          QUERY_TIMEOUT_SECS: '240'
-          STATESTORE_TABLE_NAME: !Ref StateStoreTable
-
 Outputs:
-  LambdaFunctionArn:
-    Description: Lambda function ARN — use this in your profiles.yml
-    Value: !GetAtt EmbucketLambda.Arn
+  LambdaExecutionRoleArn:
+    Description: IAM role ARN for the Embucket Lambda — pass to `aws lambda create-function --role`
+    Value: !GetAtt LambdaExecutionRole.Arn
 
-  LambdaFunctionName:
-    Description: Lambda function name
-    Value: !Ref EmbucketLambda
+  StateStoreTableName:
+    Description: DynamoDB state store table name — pass to the Lambda as STATESTORE_TABLE_NAME
+    Value: !Ref StateStoreTable
