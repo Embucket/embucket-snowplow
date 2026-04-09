@@ -26,7 +26,7 @@ BUCKET_ARN="arn:aws:s3tables:us-east-2:YOUR_ACCOUNT:bucket/YOUR_BUCKET"
 
 > **Note:** `BUCKET_ARN` is an [S3 Table Bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-buckets.html) ARN (not a regular S3 bucket). The format is `arn:aws:s3tables:REGION:ACCOUNT:bucket/NAME`. Make sure your AWS CLI is configured for the same region as your S3 Table Bucket.
 
-### 1. Deploy Embucket Lambda
+### 1. Deploy supporting infrastructure
 
 ```bash
 aws cloudformation deploy \
@@ -36,31 +36,64 @@ aws cloudformation deploy \
   --parameter-overrides S3TableBucketArn=$BUCKET_ARN
 ```
 
-This creates a Lambda function, an IAM role, and a DynamoDB state table. Takes 2-3 minutes.
+This creates the IAM execution role and the DynamoDB state table. Takes 1-2 minutes.
 
-Grab the Lambda ARN:
+Grab the role ARN and state table name from the stack outputs:
 
 ```bash
-LAMBDA_ARN=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
-  --query 'Stacks[0].Outputs[?OutputKey==`LambdaFunctionArn`].OutputValue' \
+ROLE_ARN=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
+  --query 'Stacks[0].Outputs[?OutputKey==`LambdaExecutionRoleArn`].OutputValue' \
   --output text)
+STATESTORE_TABLE=$(aws cloudformation describe-stacks --stack-name $STACK_NAME \
+  --query 'Stacks[0].Outputs[?OutputKey==`StateStoreTableName`].OutputValue' \
+  --output text)
+```
+
+### 2. Create the Embucket Lambda function
+
+Download the Lambda artifact from the [Embucket GitHub release](https://github.com/Embucket/embucket/releases):
+
+```bash
+EMBUCKET_VERSION="v0.2.2"
+curl -LO "https://github.com/Embucket/embucket/releases/download/${EMBUCKET_VERSION}/embucket-lambda-${EMBUCKET_VERSION}-arm64.zip"
+```
+
+Create the Lambda function from the downloaded zip:
+
+```bash
+LAMBDA_NAME="embucket-demo-$STACK_NAME"
+aws lambda create-function \
+  --function-name $LAMBDA_NAME \
+  --runtime provided.al2023 \
+  --architectures arm64 \
+  --handler bootstrap \
+  --memory-size 3008 \
+  --timeout 300 \
+  --role $ROLE_ARN \
+  --zip-file "fileb://embucket-lambda-${EMBUCKET_VERSION}-arm64.zip" \
+  --environment "Variables={RUST_LOG=info,METASTORE_CONFIG=config/metastore.yaml,VOLUME_TYPE=s3tables,VOLUME_DATABASE=demo,VOLUME_ARN=$BUCKET_ARN,AUTH_DEMO_USER=demo_user,AUTH_DEMO_PASSWORD=demo_password_2026,JWT_SECRET=secret,LOG_FORMAT=json,MEM_POOL_TYPE=greedy,MEM_POOL_SIZE_MB=2048,QUERY_TIMEOUT_SECS=240,STATESTORE_TABLE_NAME=$STATESTORE_TABLE}"
+
+LAMBDA_ARN=$(aws lambda get-function --function-name $LAMBDA_NAME \
+  --query 'Configuration.FunctionArn' --output text)
 echo $LAMBDA_ARN
 ```
 
-### 2. Install dependencies
+> **Note:** IAM role propagation can take a few seconds. If `create-function` fails with an assume-role error, wait 10 seconds and retry.
+
+### 3. Install dependencies
 
 ```bash
 uv sync
 ```
 
-### 3. Configure profile
+### 4. Configure profile
 
 ```bash
 cp profiles.yml.example profiles.yml
 sed -i '' "s|YOUR_LAMBDA_ARN_HERE|$LAMBDA_ARN|" profiles.yml
 ```
 
-### 4. Install dbt packages
+### 5. Install dbt packages
 
 ```bash
 uv run dbt deps --profiles-dir .
@@ -69,7 +102,7 @@ uv run dbt deps --profiles-dir .
 
 The dbt-snowplow-web package doesn't natively recognize the `embucket` adapter type. The patch script adds `embucket` alongside `snowflake` in the package's target-type checks. You need to re-run this script after every `dbt deps`.
 
-### 5. Load source data
+### 6. Load source data
 
 ```bash
 uv run python scripts/load_data.py $LAMBDA_ARN
@@ -77,7 +110,7 @@ uv run python scripts/load_data.py $LAMBDA_ARN
 
 This creates the required schemas and the `atomic.events` table, then loads ~28 MB of synthetic Snowplow web event data from S3.
 
-### 6. Load seeds and run the models
+### 7. Load seeds and run the models
 
 ```bash
 uv run dbt seed --profiles-dir .
@@ -86,7 +119,7 @@ uv run dbt run --profiles-dir .
 
 This loads reference tables (GA4 source categories, geo/language mappings) and builds the full Snowplow web analytics pipeline. Runs 18 models in about 45 seconds, producing page views, sessions, and users tables.
 
-### 7. Query the results
+### 8. Query the results
 
 ```bash
 uv run dbt show --profiles-dir . --inline "SELECT * FROM demo.atomic_derived.snowplow_web_page_views" --limit 10
@@ -96,9 +129,10 @@ uv run dbt show --profiles-dir . --inline "SELECT * FROM demo.atomic_derived.sno
 
 ## Cleanup
 
-Delete the CloudFormation stack (Lambda, IAM role, DynamoDB table):
+Delete the Lambda function and the CloudFormation stack (IAM role, DynamoDB table):
 
 ```bash
+aws lambda delete-function --function-name embucket-demo-$STACK_NAME
 aws cloudformation delete-stack --stack-name $STACK_NAME
 ```
 
