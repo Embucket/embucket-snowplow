@@ -128,11 +128,11 @@ CREATE TABLE IF NOT EXISTS demo.atomic.events (
     event_fingerprint STRING,
     true_tstamp TIMESTAMP_NTZ,
     load_tstamp TIMESTAMP_NTZ,
-    contexts_com_snowplowanalytics_snowplow_web_page_1 STRING,
-    unstruct_event_com_snowplowanalytics_snowplow_consent_preferences_1 STRING,
-    unstruct_event_com_snowplowanalytics_snowplow_cmp_visible_1 STRING,
-    contexts_com_iab_snowplow_spiders_and_robots_1 STRING,
-    contexts_com_snowplowanalytics_snowplow_ua_parser_context_1 STRING,
-    contexts_nl_basjes_yauaa_context_1 STRING,
-    unstruct_event_com_snowplowanalytics_snowplow_web_vitals_1 STRING
+    contexts_com_snowplowanalytics_snowplow_web_page_1 VARIANT,
+    unstruct_event_com_snowplowanalytics_snowplow_consent_preferences_1 VARIANT,
+    unstruct_event_com_snowplowanalytics_snowplow_cmp_visible_1 VARIANT,
+    contexts_com_iab_snowplow_spiders_and_robots_1 VARIANT,
+    contexts_com_snowplowanalytics_snowplow_ua_parser_context_1 VARIANT,
+    contexts_nl_basjes_yauaa_context_1 VARIANT,
+    unstruct_event_com_snowplowanalytics_snowplow_web_vitals_1 VARIANT
 );

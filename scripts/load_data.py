@@ -1,111 +1,59 @@
 #!/usr/bin/env python3
-"""Load source data into Embucket Lambda.
+"""Load Snowplow source data into Embucket Lambda."""
 
-Usage:
-    python scripts/load_data.py <lambda_function_arn>
+from __future__ import annotations
 
-Reads SQL from scripts/create_table.sql and scripts/copy_data.sql,
-then executes them against the Lambda via boto3 invoke.
-"""
-import boto3
-import json
-import sys
-import uuid
+import argparse
 from pathlib import Path
+from embucket_client import ensure_snowplow_schemas, lambda_client, login, run_sql
 
 
-def invoke(client, fn, payload):
-    resp = client.invoke(FunctionName=fn, Payload=json.dumps(payload))
-    raw = resp["Payload"].read()
-    if resp.get("FunctionError"):
-        raise RuntimeError(f"Lambda error: {raw.decode()[:300]}")
-    return json.loads(raw) if raw else {}
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("lambda_function", help="Lambda ARN or function name")
+    parser.add_argument(
+        "--copy-uri",
+        help="Override the source parquet path instead of using scripts/copy_data.sql",
+    )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Append into demo.atomic.events instead of dropping and recreating it",
+    )
+    return parser.parse_args()
 
 
-def login(client, fn):
-    result = invoke(client, fn, {
-        "version": "2.0",
-        "rawPath": "/session/v1/login-request",
-        "rawQueryString": "",
-        "requestContext": {
-            "http": {"method": "POST", "path": "/session/v1/login-request", "sourceIp": "127.0.0.1"},
-            "accountId": "anonymous", "apiId": "anonymous",
-        },
-        "headers": {"content-type": "application/json", "host": "localhost", "x-forwarded-for": "127.0.0.1"},
-        "body": json.dumps({"data": {
-            "LOGIN_NAME": "demo_user", "PASSWORD": "demo_password_2026",
-            "CLIENT_APP_ID": "setup", "CLIENT_APP_VERSION": "1.0",
-            "ACCOUNT_NAME": "embucket", "CLIENT_ENVIRONMENT": {}, "SESSION_PARAMETERS": {},
-        }}),
-        "isBase64Encoded": False,
-    })
-    return json.loads(result["body"])["data"]["token"]
-
-
-def run_sql(client, fn, token, sql):
-    result = invoke(client, fn, {
-        "version": "2.0",
-        "rawPath": "/queries/v1/query-request",
-        "rawQueryString": f"requestId={uuid.uuid4()}",
-        "requestContext": {
-            "http": {"method": "POST", "path": "/queries/v1/query-request", "sourceIp": "127.0.0.1"},
-            "accountId": "anonymous", "apiId": "anonymous",
-        },
-        "headers": {
-            "content-type": "application/json",
-            "host": "localhost",
-            "x-forwarded-for": "127.0.0.1",
-            "authorization": f'Snowflake Token="{token}"',
-        },
-        "body": json.dumps({"sqlText": sql}),
-        "isBase64Encoded": False,
-    })
-    body = json.loads(result.get("body", "{}"))
-    if not body.get("success"):
-        raise RuntimeError(f"SQL failed: {body.get('message', 'unknown error')}")
-    return body
+def build_copy_sql(copy_uri: str) -> str:
+    return f"""COPY INTO demo.atomic.events
+FROM '{copy_uri}'
+FILE_FORMAT = (TYPE = PARQUET)
+MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE;"""
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python scripts/load_data.py <lambda_function_arn_or_name>")
-        sys.exit(1)
-
-    fn = sys.argv[1]
-    region = "us-east-2"
-    if ":lambda:" in fn:
-        region = fn.split(":")[3]
-
-    client = boto3.client("lambda", region_name=region)
+    args = parse_args()
+    fn = args.lambda_function
+    client = lambda_client(fn)
     scripts_dir = Path(__file__).parent
 
     print("Logging in...")
     token = login(client, fn)
 
-    # Create required schemas for snowplow_web
-    schemas = [
-        "CREATE SCHEMA IF NOT EXISTS demo.atomic",
-        "CREATE SCHEMA IF NOT EXISTS demo.atomic_scratch",
-        "CREATE SCHEMA IF NOT EXISTS demo.atomic_derived",
-        "CREATE SCHEMA IF NOT EXISTS demo.atomic_snowplow_manifest",
-    ]
-    for sql in schemas:
-        print(f"  {sql}")
-        run_sql(client, fn, token, sql)
+    print("Ensuring required schemas exist...")
+    ensure_snowplow_schemas(client, fn, token)
 
-    # Drop and recreate events table (to pick up schema changes)
-    print("Dropping existing events table (if any)...")
-    try:
-        run_sql(client, fn, token, "DROP TABLE IF EXISTS demo.atomic.events")
-    except RuntimeError:
-        pass  # Table may not exist
+    if not args.append:
+        print("Dropping existing events table (if any)...")
+        try:
+            run_sql(client, fn, token, "DROP TABLE IF EXISTS demo.atomic.events")
+        except RuntimeError:
+            pass
 
     create_sql = (scripts_dir / "create_table.sql").read_text().strip()
-    print("Creating events table...")
+    print("Ensuring events table exists...")
     run_sql(client, fn, token, create_sql)
 
-    # Load data
-    copy_sql = (scripts_dir / "copy_data.sql").read_text().strip()
+    copy_sql = build_copy_sql(args.copy_uri) if args.copy_uri else (scripts_dir / "copy_data.sql").read_text().strip()
     print("Loading data (this may take a minute)...")
     run_sql(client, fn, token, copy_sql)
 

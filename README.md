@@ -110,6 +110,8 @@ uv run python scripts/load_data.py $LAMBDA_ARN
 
 This creates the required schemas and the `atomic.events` table, then loads ~28 MB of synthetic Snowplow web event data from S3.
 
+The larger parquet source used for benchmarking is `s3://embucket-testdata/dbt_snowplow_data/synthetic_web_analytics_1g_fixed.parquet`. It is currently about 4.67 million rows and spans `collector_tstamp` from `2022-08-19 00:00:00.836` through `2022-08-26 00:05:36.751`.
+
 ### 7. Load seeds and run the models
 
 ```bash
