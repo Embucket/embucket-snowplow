@@ -146,21 +146,73 @@ Consistent with different integer-truncation of second-level timestamp
 subtraction between engines. Cumulative effect is ~1% divergence on the
 table-level SUM.
 
-**Finding B — `users.referrer` column NULL drift.** At 1/10 scale, 239
-of 12,346 users (2%) differ on whether `referrer` is NULL. Same 18
-distinct non-null referrer values on both engines. Root cause in
-`snowplow_web_users_this_run`:
+**Finding B — `users.referrer` column NULL drift, root-caused to an
+Embucket SQL scoping bug.** At 1/10 scale, 239 of 12,346 users (2%)
+differ on whether `referrer` is NULL; at 2/10 scale (batch 1+2) this
+grows to **8,166 of 35,094 users (23%) with different
+`first_domain_sessionid` between engines**. Initial hypothesis was
+`MAX(uuid)` tie-breaking when two sessions share `start_tstamp`, but
+that is **rejected**: zero users have tied `start_tstamp` in either
+engine.
+
+The actual root cause is in `snowplow_web_users_aggs.sql`:
 
 ```sql
-max(case when start_tstamp = user_start_tstamp
-         then domain_sessionid end) AS first_domain_sessionid
+SELECT domain_userid,
+  user_start_tstamp AS start_tstamp,       -- alias shadows column!
+  user_end_tstamp   AS end_tstamp,         -- alias shadows column!
+  MAX(CASE WHEN start_tstamp = user_start_tstamp THEN domain_sessionid END) AS first_domain_sessionid,
+  MAX(CASE WHEN end_tstamp   = user_end_tstamp   THEN domain_sessionid END) AS last_domain_sessionid,
+  ...
+FROM snowplow_web_users_sessions_this_run
+GROUP BY 1, 2, 3
 ```
 
-When a user has two sessions sharing `start_tstamp` (tie), `MAX(uuid)`
-resolves to a different UUID on each engine, joining to a different
-first-session row whose `referrer` is populated on one engine and NULL
-on the other. Deterministic tie-break difference, not a correctness bug
-per se.
+The SELECT list aliases `user_start_tstamp AS start_tstamp`, so the
+name `start_tstamp` is ambiguous: it can refer to either the FROM
+table's column or the SELECT alias.
+
+- **Snowflake** resolves `start_tstamp` in the CASE to the FROM
+  table's column (ANSI-correct). MAX picks the session whose actual
+  `start_tstamp` equals the user's first session start.
+- **Embucket** resolves `start_tstamp` in the CASE to the SELECT-list
+  alias `user_start_tstamp`, making the condition
+  `user_start_tstamp = user_start_tstamp` (always true).
+  `MAX(CASE WHEN TRUE THEN domain_sessionid END)` degenerates to
+  `MAX(domain_sessionid)` over all of the user's sessions — the
+  lexicographic max UUID. The same collapse happens to
+  `last_domain_sessionid`, so Embucket's `first_*` and `last_*` fields
+  degenerate to the same row.
+
+Minimal standalone reproducer (10 lines, no snowplow):
+
+```sql
+WITH s AS (
+  SELECT 'S1' AS sid, TIMESTAMP '2020-01-01 00:00:00' AS start_tstamp,
+                      TIMESTAMP '2020-01-01 00:00:00' AS user_start_tstamp
+  UNION ALL
+  SELECT 'S2' AS sid, TIMESTAMP '2020-01-01 05:00:00' AS start_tstamp,
+                      TIMESTAMP '2020-01-01 00:00:00' AS user_start_tstamp
+)
+SELECT user_start_tstamp AS start_tstamp,
+       MAX(CASE WHEN start_tstamp = user_start_tstamp THEN sid END) AS first_sid
+FROM s
+GROUP BY user_start_tstamp;
+-- Snowflake: first_sid = 'S1'  (correct: only S1 has start_tstamp == user_start_tstamp)
+-- Embucket:  first_sid = 'S2'  (alias-shadow bug: CASE collapses to always-true)
+```
+
+Removing the `AS start_tstamp` alias makes both engines return `'S1'`.
+This is a **silently wrong-result bug** -- no error, no warning;
+Embucket just produces incorrect output when a SELECT alias shadows
+an underlying column name that is referenced elsewhere in the same
+SELECT. Any aggregation of this shape is affected.
+
+User-facing impact on dbt-snowplow-web: the `first_*` fields of
+`snowplow_web_users` (first_page_url, first_page_title, first_geo_*,
+first_br_lang, referrer, etc.) are wrong on Embucket for every user
+with >1 session. The final MERGE propagates these wrong values to the
+derived table.
 
 ### 3.3 0.61M rows — batch 2 added (MERGE path for incremental models)
 
@@ -239,7 +291,7 @@ so the ON condition is satisfied and WHEN MATCHED UPDATE should fire.
 | 1 | Embucket OOMs on `snowplow_web_base_events_this_run` at 2.83M rows even with 10 GB pool + 10 GB spill | Embucket engine | memory/spill behavior on wide row with JSON VARIANT columns and repartition-on-join |
 | 2 | Unpatched snowplow-web fails on Embucket with `Unexpected target type embucket` | dbt package | hardcoded `target.type` branches; patchable via 1-line regex |
 | 3 | `absolute_time_in_s` drifts ±1 second per row | both engines | different integer truncation of timestamp subtraction; visible in ~1% of rows |
-| 4 | `users.referrer` NULL-fill differs for 2% of users | snowplow-web package | `MAX(uuid)` tie-break when two sessions share `start_tstamp`; deterministic per engine but not engine-invariant |
+| 4 | `users.referrer` NULL-fill differs for 2% / `first_domain_sessionid` differs for 23% of users | **Embucket engine** | **alias-shadow bug: column reference inside aggregate CASE resolves to SELECT alias instead of FROM column; silently wrong result with 10-line standalone reproducer** |
 | 5 | Snowplow users/page_views/sessions derived tables preserve the source's duplicate-`event_id` rows on first CTAS | snowplow-web package | `_this_run → derived` step doesn't dedup on unique_key; Snowflake errors on second MERGE, Embucket silently appends |
 | 6 | **Embucket MERGE UPDATE fails to apply for ~9% of matching target rows on the users derived table** | **Embucket engine** | **compiled MERGE SQL identical; source identical; ~9% of matched rows silently not updated. One-sided (sf ≥ emb always)** |
 
@@ -259,7 +311,7 @@ order-insensitive behavior (tie-breaks, dedup) and because the source
 has DQ issues the package assumes away. A clean source plus strict-SQL
 snowplow-web would remove these.
 
-**3. Two Embucket-specific engine issues remain.**
+**3. Three Embucket-specific engine issues remain.**
 
    - **Memory**: at 2.83M rows the base-events repartition exceeds 9 GB
      pool + 10 GB spill. Either the repartition shuffle is
@@ -269,14 +321,23 @@ snowplow-web would remove these.
      investigating whether disk spill actually engages for the
      RepartitionExec path.
 
-   - **MERGE UPDATE correctness**: Finding 6 is the most concrete
-     correctness finding. Identical SQL, identical source data,
-     identical target pre-state (both engines have the same batch-1
-     row); Snowflake executes the UPDATE, Embucket leaves ~9% of
-     matching rows unmodified. Investigation should focus on
-     Embucket's handling of MERGE when the ON clause combines a
-     `BETWEEN` predicate on the target with an equality predicate on
-     the source's unique key. Candidate hypotheses:
+   - **Alias-shadow correctness bug (Finding 4)**: column references
+     inside aggregate `CASE` expressions resolve to SELECT-list
+     aliases instead of the FROM table's columns. Silently wrong
+     results, no error. 10-line standalone reproducer attached. This
+     is the root cause of 23% of users getting wrong
+     `first_domain_sessionid` / `referrer` / first-session fields on
+     the derived `snowplow_web_users` table. High-severity because
+     any downstream query with a `SELECT col AS same_name_as_another_col`
+     pattern is silently compromised.
+
+   - **MERGE UPDATE correctness (Finding 6)**: identical SQL,
+     identical source data, identical target pre-state (both engines
+     have the same batch-1 row); Snowflake executes the UPDATE,
+     Embucket leaves ~9% of matching rows unmodified. Investigation
+     should focus on Embucket's handling of MERGE when the ON clause
+     combines a `BETWEEN` predicate on the target with an equality
+     predicate on the source's unique key. Candidate hypotheses:
      - Predicate is evaluated against a pre-filtered subset of the
        target rather than all target rows (incorrect index/partition
        pruning).
