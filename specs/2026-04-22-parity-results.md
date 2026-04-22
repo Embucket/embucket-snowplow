@@ -35,38 +35,49 @@ an upstream data quality issue inherited from the Glue-managed source.
 
 Pre-merge state is byte-equivalent across engines.
 
-### Derived tables diverge in MERGE behavior
+### Derived tables: first `dbt run` CTAS, second+ run MERGE
+
+On the first `dbt run` with no pre-existing target, dbt's incremental
+materialization issues `CREATE TABLE AS` (Snowflake) / equivalent
+(Embucket), bypassing MERGE entirely. Both engines produce identical
+counts, and **both preserve the source duplicates** -- the snowplow-web
+`_this_run → derived` step does not deduplicate on unique_key:
+
+| table | Embucket rows / distinct | Snowflake rows / distinct | dup ratio |
+|-------|--------------------------|---------------------------|-----------|
+| snowplow_web_page_views | 814,555 / 775,543 page_view_id | 814,569 / 775,543 | 1.050 |
+| snowplow_web_sessions   | 360,999 / 317,162 domain_sessionid | 360,999 / 317,162 | 1.138 |
+| snowplow_web_users      | ? | 122,041 / 71,352 domain_userid | 1.710 |
+
+On a **second** `dbt run` with the scratch still holding the same
+duplicates and the target now populated:
 
 - **Snowflake** fails loudly: `100090 (42P18): Duplicate row detected
-  during DML action` on `snowplow_web_page_views` and
-  `snowplow_web_sessions` merges. ANSI MERGE cannot match multiple
-  source rows to one target row when two source rows share the
-  unique_key.
-- **Embucket** succeeds silently. Final derived tables retain the
-  duplicates from the scratch:
-
-| table | rows | distinct unique_key | dup ratio |
-|-------|------|---------------------|-----------|
-| demo.atomic_derived.snowplow_web_page_views | 814,555 | 775,543 page_view_id | 1.050 |
-| demo.atomic_derived.snowplow_web_sessions   | 360,999 | 317,162 domain_sessionid | 1.138 |
-
-This contradicts the model config `unique_key='page_view_id'`
-(`domain_sessionid` for sessions) -- Embucket's incremental MERGE is
-not deduplicating by unique_key.
+  during DML action`. ANSI MERGE refuses to match multiple source rows
+  to one target row when they share the unique_key.
+- **Embucket** succeeds silently and adds more duplicate rows to the
+  derived tables (this is how the first full harness run ended up with
+  Embucket page_views = 1.34M vs Snowflake 814K -- two dbt runs amplified
+  Embucket's duplicate count).
 
 ## Findings
 
 1. **Glue source has ~4.7% duplicate event_ids**. Snowplow assumes the
    atomic layer is deduplicated upstream; this source violates that
-   contract.
-2. **Embucket adapter bug: incremental MERGE ignores unique_key when
-   the source has duplicates**. Snowflake errors correctly; Embucket
-   silently lets duplicate rows through to the derived layer. Worth
-   filing upstream.
-3. **Snowflake strict-MERGE behavior** is surfacing what is really a
-   source data quality problem. Snowplow Web doesn't have a global
-   pre-merge `distinct on unique_key` -- the scratch pipelines assume
-   the atomic-level dedup already happened.
+   contract. Root cause of everything below.
+2. **snowplow-web does not deduplicate on unique_key in the
+   `_this_run → derived` step**, on either engine. Both Snowflake and
+   Embucket's first `dbt run` CTAS the scratch content verbatim, so
+   both derived tables end up with duplicate page_view_id /
+   domain_sessionid / domain_userid rows. Not an engine bug -- a
+   package-level assumption that the atomic layer is already clean.
+3. **MERGE semantics diverge on re-run.** With duplicates in the
+   scratch `_this_run` tables and rows in the target, Snowflake's
+   MERGE errors with `100090 (42P18): Duplicate row detected` while
+   Embucket's MERGE succeeds and keeps inserting more duplicate rows.
+   This explains the earlier "Embucket 1.34M page_views vs Snowflake
+   814K" numbers -- two dbt runs on Embucket against duplicated
+   source, each run appending.
 
 ## Reproducing
 
@@ -81,8 +92,11 @@ uv run python scripts/load_from_glue.py insert \
 uv run python scripts/snowflake_refresh.py
 uv run dbt seed --profiles-dir . --target dev
 uv run dbt seed --profiles-dir . --target snowflake
-uv run dbt run --profiles-dir . --target dev         # 31 PASS
-uv run dbt run --profiles-dir . --target snowflake   # 2 errors on MERGE
+uv run dbt run --profiles-dir . --target dev         # 31 PASS on first run (CTAS)
+uv run dbt run --profiles-dir . --target snowflake   # 31 PASS on first run (CTAS)
+# Re-running either without resetting scratch/derived state:
+uv run dbt run --profiles-dir . --target snowflake   # 2 errors on MERGE (dup source)
+uv run dbt run --profiles-dir . --target dev         # succeeds silently, appending dups
 ```
 
 Scratch counts can be read from either engine:
