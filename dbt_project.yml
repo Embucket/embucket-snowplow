@@ -12,7 +12,7 @@ dispatch:
 vars:
   snowplow__start_date: '2026-04-22'
   snowplow__atomic_schema: 'atomic'
-  snowplow__events_table: 'events_0416'
+  snowplow__events_table: "{{ 'events_0416_v' if target.type == 'snowflake' else 'events_0416' }}"
   # Context flags — set to true once the corresponding context column is
   # populated (see scripts/ctas_from_glue.sql). web_page_1 is always on.
   snowplow__enable_iab: false

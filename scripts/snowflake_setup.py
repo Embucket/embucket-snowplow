@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 
+import boto3
 import snowflake.connector
 
 DATABASE = "sturukin_db"
@@ -37,6 +38,8 @@ ICEBERG_TABLE = "events_0416"
 CATALOG_INTEGRATION_NAME = "SNOWPLOW_S3T"
 CATALOG_NAME = "767397688925:s3tablescatalog/snowplow"
 SIGV4_ROLE = "arn:aws:iam::767397688925:role/snowflake-table-bucket-access"
+LF_CATALOG_ID = "767397688925:s3tablescatalog/snowplow"
+AWS_REGION = "us-east-2"
 
 
 def exec_fetchall(conn, sql: str):
@@ -94,6 +97,50 @@ def recreate_iceberg_table(conn):
     """)
 
 
+JSON_CONTEXT_COLUMNS = [
+    "contexts_com_snowplowanalytics_snowplow_web_page_1",
+    "contexts_com_snowplowanalytics_snowplow_ua_parser_context_1",
+    "contexts_nl_basjes_yauaa_context_1",
+    "unstruct_event_com_snowplowanalytics_snowplow_consent_preferences_1",
+    "unstruct_event_com_snowplowanalytics_snowplow_cmp_visible_1",
+    "contexts_com_iab_snowplow_spiders_and_robots_1",
+    "unstruct_event_com_snowplowanalytics_snowplow_web_vitals_1",
+]
+
+
+def recreate_variant_view(conn):
+    """View that PARSE_JSONs the VARCHAR context columns into VARIANT for dbt."""
+    view_fqn = f"{DATABASE}.{SCHEMA}.{ICEBERG_TABLE}_v"
+    print(f"  (re)creating variant view {view_fqn}...")
+    exclude = ", ".join(JSON_CONTEXT_COLUMNS)
+    parsed = ",\n          ".join(
+        f"TRY_PARSE_JSON({c}) AS {c}" for c in JSON_CONTEXT_COLUMNS
+    )
+    exec_fetchall(conn, f"""
+        CREATE OR REPLACE VIEW {view_fqn} AS
+        SELECT
+          * EXCLUDE ({exclude}),
+          {parsed}
+        FROM {DATABASE}.{SCHEMA}.{ICEBERG_TABLE}
+    """)
+
+
+def ensure_lf_grant():
+    """Re-grant LF DESCRIBE+SELECT; needed after every load_from_glue.py init."""
+    print(f"  granting Lake Formation DESCRIBE+SELECT on "
+          f"{LF_CATALOG_ID}.{SCHEMA}.{ICEBERG_TABLE}...")
+    lf = boto3.client("lakeformation", region_name=AWS_REGION)
+    lf.grant_permissions(
+        Principal={"DataLakePrincipalIdentifier": SIGV4_ROLE},
+        Resource={"Table": {
+            "CatalogId": LF_CATALOG_ID,
+            "DatabaseName": SCHEMA,
+            "Name": ICEBERG_TABLE,
+        }},
+        Permissions=["DESCRIBE", "SELECT"],
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--connection", default="default",
@@ -105,7 +152,9 @@ def main() -> None:
         print("== Snowflake parity setup ==")
         ensure_integration(conn)
         ensure_db_schema(conn)
+        ensure_lf_grant()
         recreate_iceberg_table(conn)
+        recreate_variant_view(conn)
         count = exec_fetchall(conn, f"SELECT COUNT(*) FROM {DATABASE}.{SCHEMA}.{ICEBERG_TABLE}")[0][0]
         print(f"\n{DATABASE}.{SCHEMA}.{ICEBERG_TABLE} row count after setup: {count}")
     finally:

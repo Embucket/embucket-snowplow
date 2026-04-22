@@ -227,7 +227,13 @@ def run(source_only: bool) -> int:
         sf_count = sf_rowcount(sf_conn, sf_fqn)
         print(f"\n{spec.name}:  embucket={emb_count}  snowflake={sf_count}")
         if emb_count != sf_count:
+            print("  ROWCOUNT DIFFERS -- skipping hash diff "
+                  "(rowcount mismatch is the first-order finding)")
             any_fail = True
+            continue
+        if emb_count == 0:
+            print("  both sides empty; nothing to hash")
+            continue
         emb = emb_hashes(emb_client, emb_token, emb_fqn, spec)
         sf = sf_hashes(sf_conn, sf_fqn, spec)
         diff = diff_sides(emb, sf)
