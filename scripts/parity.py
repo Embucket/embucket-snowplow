@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import embucket_client  # noqa: E402
 
 EMBUCKET_DERIVED = "demo.atomic_derived"
-SNOWFLAKE_DERIVED = "sturukin.atomic_derived"
+SNOWFLAKE_DERIVED = "sturukin_db.atomic_derived"
 
 EMBUCKET_LAMBDA_ARN = (
     "arn:aws:lambda:us-east-2:767397688925:function:"
@@ -211,7 +211,7 @@ def run(source_only: bool) -> int:
     emb_client, emb_token = emb_session()
 
     emb_src = emb_rowcount(emb_client, emb_token, "demo.atomic.events_0416")
-    sf_src = sf_rowcount(sf_conn, "sturukin.atomic.events_0416")
+    sf_src = sf_rowcount(sf_conn, "sturukin_db.atomic.events_0416")
     print(f"source events_0416:  embucket={emb_src}  snowflake={sf_src}")
     if emb_src != sf_src:
         print("  FAIL: source rowcount mismatch")
