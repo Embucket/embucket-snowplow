@@ -17,6 +17,6 @@ embucket_demo:
       password: YOUR_SNOWFLAKE_PASSWORD
       role: YOUR_SNOWFLAKE_ROLE
       warehouse: YOUR_SNOWFLAKE_WAREHOUSE
-      database: sturukin
+      database: sturukin_db
       schema: atomic
       threads: 4
