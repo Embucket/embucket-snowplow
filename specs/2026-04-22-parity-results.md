@@ -134,6 +134,63 @@ now 609,671 rows. Both engines: `dbt run` 20 PASS.
   `sum_page_views` +6.4%, `sum_sessions` +6.5%. Direction check:
   `sf_aggregate_larger=3164 emb_aggregate_larger=0`.
 
+#### Drill-down: where does the divergence enter?
+
+Every stage in the lineage before the final MERGE produces
+byte-identical aggregates on both engines:
+
+| stage | rowcount | SUM(page_views) | SUM(engaged_time_in_s) |
+|-------|----------|-----------------|------------------------|
+| `snowplow_web_base_events_this_run` | 609,671 / 609,671 | -- | -- |
+| `snowplow_web_base_sessions_this_run` | 75,642 / 75,642 | -- | -- |
+| `snowplow_web_sessions_this_run` | 75,482 / 75,482 | -- | -- |
+| `snowplow_web_sessions` (derived) | 75,482 / 75,482 | -- | -- |
+| `snowplow_web_users_sessions_this_run` | 75,482 / 75,482 | **181,900 both** | **3,298,530 both** |
+| `snowplow_web_users_aggs` | 35,094 / 35,094 | **181,900 both** | **3,298,530 both** |
+| `snowplow_web_users_this_run` | 35,094 / 35,094 | -- | -- |
+| **`snowplow_web_users` (derived)** | 35,094 / 35,094 | **emb 170,884 / sf 181,900** | **emb 3,100,035 / sf 3,298,530** |
+
+The scratch source for the MERGE has identical data on both engines;
+the divergence enters purely at the MERGE step.
+
+Per-user spot check for a high-diff user
+`eeb8f559-c8d0-4c3b-b50f-e70a11a5d997`:
+
+| source | Embucket | Snowflake |
+|--------|----------|-----------|
+| scratch `users_this_run` | (39 pv, 16 sess, 535 eng, end=15:14:44) | (39 pv, 16 sess, 535 eng, end=15:14:44) |
+| derived `users` after MERGE | **(27 pv, 9 sess, 415 eng, end=15:02:11)** | (39 pv, 16 sess, 535 eng, end=15:14:44) |
+
+The scratch `users_this_run` row on Embucket has the correct
+cumulative batch-1+batch-2 values, but after the MERGE INTO the
+derived target, Embucket's row still carries the batch-1 values
+unchanged. Snowflake's MERGE updates correctly.
+
+The compiled MERGE SQL is **identical** on both engines (the
+`patch_snowplow.sh` rewrite makes Embucket dispatch the Snowflake
+MERGE macro):
+
+```sql
+MERGE INTO <target> AS DBT_INTERNAL_DEST
+  USING <__dbt_tmp> AS DBT_INTERNAL_SOURCE
+  ON (DBT_INTERNAL_DEST.start_tstamp BETWEEN
+        '2026-04-22 14:52:51.530000' AND '2026-04-22 15:15:39.548000')
+    AND (DBT_INTERNAL_SOURCE.domain_userid = DBT_INTERNAL_DEST.domain_userid)
+WHEN MATCHED THEN UPDATE SET ...
+WHEN NOT MATCHED THEN INSERT ...
+```
+
+For the affected user, the target row's `start_tstamp = 14:58:56.280`
+is well inside the BETWEEN range and the `domain_userid` is present
+in both sides, so Snowflake fires UPDATE and Embucket does not.
+Embucket's server-side MERGE UPDATE is either mis-evaluating the ON
+clause (fewer matches than expected) or silently no-op'ing the
+WHEN MATCHED UPDATE branch for some matching rows -- ~9% of rows
+affected on the users MERGE at 609K source events. Surfaces as
+Snowflake aggregates strictly >= Embucket aggregates (never the
+reverse), consistent with "batch-1 row left unmodified while it
+should have been replaced by cumulative batch-1+batch-2 scratch row."
+
 Example users where batch 1 activity is visible on Snowflake but not
 Embucket:
 ```
