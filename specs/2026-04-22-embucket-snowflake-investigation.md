@@ -138,13 +138,48 @@ Both engines: `dbt seed` + `dbt run` succeed, 20 PASS each.
 
 Two real divergences isolated at this scale:
 
-**Finding A — `absolute_time_in_s` ±1-second rounding.** Spot-checks:
-- Session `7da3c35f-5565-4903-88df-bb3c19a918f9`: Embucket 231, Snowflake 230; all other columns identical.
-- Page view `00005058-c0e9-4e2a-8c2a-24db2e1f8fa4`: Embucket 40, Snowflake 39; all others identical.
+**Finding A — `DATEDIFF('second', a, b)` semantics diverge.** Initial
+hypothesis was "different integer truncation"; the real finding is
+that the two engines implement fundamentally different semantics for
+`DATEDIFF('second', ...)`:
 
-Consistent with different integer-truncation of second-level timestamp
-subtraction between engines. Cumulative effect is ~1% divergence on the
-table-level SUM.
+- **Snowflake**: boundary-count. `DATEDIFF('second', a, b) =
+  floor(epoch_seconds(b)) - floor(epoch_seconds(a))`. Matches the
+  Snowflake documentation.
+- **Embucket**: `CEIL((b - a) / 1 second)`. Any positive sub-second
+  difference rounds up to 1.
+
+Test matrix (10-line standalone reproducer):
+
+| duration a → b | true sec | Embucket | Snowflake |
+|---|---|---|---|
+| `00:00:00.100` → `00:00:00.900` (same second) | 0.8 | **1** | 0 |
+| `00:00:00.900` → `00:00:01.100` (straddles boundary) | 0.2 | 1 | 1 |
+| `00:00:00.500` → `00:00:01.400` (straddles) | 0.9 | 1 | 1 |
+| `00:00:00.250` → `00:00:01.750` | 1.5 | **2** | 1 |
+| `00:00:00.500` → `00:00:02.900` | 2.4 | **3** | 2 |
+| `00:00:00.000` → `00:00:02.500` | 2.5 | **3** | 2 |
+| `00:00:00.999` → `00:01:00.000` | 59.001 | 60 | 60 |
+
+The engines agree only when both endpoints sit on exact second
+boundaries, or when the ceil-of-duration happens to equal the
+boundary-count.
+
+Impact on snowplow-web:
+- `page_views.absolute_time_in_s = DATEDIFF('second', p.derived_tstamp,
+  COALESCE(t.end_tstamp, p.derived_tstamp))`
+- `sessions.absolute_time_in_s = DATEDIFF('second', MIN(derived_tstamp),
+  MAX(derived_tstamp))`
+
+Embucket inflates each row by 0 or +1 seconds. Spot-checks confirmed:
+- Session `7da3c35f-...`: Embucket 231, Snowflake 230; all other
+  columns identical.
+- Page view `00005058-...`: Embucket 40, Snowflake 39; all else equal.
+
+Aggregate inflation at 609K-event scale: +1.25% on
+`page_views.sum_absolute_time_in_s`, +0.85% on
+`sessions.sum_absolute_time_in_s`. Never the other direction.
+**Hypothesis confirmed, with refined formula.**
 
 **Finding B — `users.referrer` column NULL drift, root-caused to an
 Embucket SQL scoping bug.** At 1/10 scale, 239 of 12,346 users (2%)
@@ -290,7 +325,7 @@ so the ON condition is satisfied and WHEN MATCHED UPDATE should fire.
 | 0 | Source Glue table has 4.7% duplicate `event_id` | upstream | data quality (not engine) |
 | 1 | Embucket OOMs on `snowplow_web_base_events_this_run` at 2.83M rows even with 10 GB pool + 10 GB spill | Embucket engine | memory/spill behavior on wide row with JSON VARIANT columns and repartition-on-join |
 | 2 | Unpatched snowplow-web fails on Embucket with `Unexpected target type embucket` | dbt package | hardcoded `target.type` branches; patchable via 1-line regex |
-| 3 | `absolute_time_in_s` drifts ±1 second per row | both engines | different integer truncation of timestamp subtraction; visible in ~1% of rows |
+| 3 | `absolute_time_in_s` inflated 0-1 sec per row on Embucket, never on Snowflake | **Embucket engine** | **`DATEDIFF('second', a, b)` = CEIL((b-a)/1s) on Embucket vs boundary-count on Snowflake; documented Snowflake semantics is boundary-count, Embucket is non-compliant** |
 | 4 | `users.referrer` NULL-fill differs for 2% / `first_domain_sessionid` differs for 23% of users | **Embucket engine** | **alias-shadow bug: column reference inside aggregate CASE resolves to SELECT alias instead of FROM column; silently wrong result with 10-line standalone reproducer** |
 | 5 | Snowplow users/page_views/sessions derived tables preserve the source's duplicate-`event_id` rows on first CTAS | snowplow-web package | `_this_run → derived` step doesn't dedup on unique_key; Snowflake errors on second MERGE, Embucket silently appends |
 | 6 | **Embucket MERGE UPDATE fails to apply for ~9% of matching target rows on the users derived table** | **Embucket engine** | **compiled MERGE SQL identical; source identical; ~9% of matched rows silently not updated. One-sided (sf ≥ emb always)** |
