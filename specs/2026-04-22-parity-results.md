@@ -1,57 +1,100 @@
 # Parity harness run results (2026-04-22)
 
-Commands: `load_from_glue.py init` → `snowflake_setup.py` → batch 1 + dbt + parity → batch 2 + dbt + parity.
+## First full run (batch 1 + batch 2, stale state between)
 
-## Source (Iceberg events_0416)
+Initial run on the first loaded state. Both engines processed 2.83M rows
+after batch 1 and 6.16M after batch 2. Rowcount divergence on all three
+headline tables. Snowflake batch-2 incremental did not advance headline
+models (incremental manifest guard did not trigger). Embucket users table
+grew far beyond input (15.4M vs 6.16M events). See git history.
 
-Both engines read the same S3 Tables Iceberg snapshot. Source parity holds
-after each Athena insert + Snowflake refresh.
+## Clean batch-1-only investigation (the useful one)
 
-| batch | embucket | snowflake |
-|-------|----------|-----------|
-| 1 (15:00–15:30) | 2,834,944 | 2,834,944 |
-| 2 (15:30–16:00) | 6,162,099 | 6,162,099 |
+After this run all downstream state (derived/scratch/manifest schemas on
+both engines; dbt seeds re-run on both) was dropped, `load_from_glue.py
+init` fresh, only batch 1 loaded, `dbt run` once per target.
 
-## Derived tables — findings
+### Source
 
-Rowcount-only comparison (hash-diff skipped when rowcounts differ).
+| table | rows | distinct event_id | dup ratio |
+|-------|------|-------------------|-----------|
+| Glue source (hooli_events_0417_v2, 15:00-15:30 window) | 2,834,944 | 2,700,579 | 1.050 |
+| demo.atomic.events_0416 (Embucket) | 2,834,944 | 2,700,579 | 1.050 |
+| sturukin_db.atomic.events_0416 (Snowflake) | 2,834,944 | 2,700,579 | 1.050 |
 
-### After batch 1
+Source parity is exact. Source contains **4.7% duplicate event_ids** --
+an upstream data quality issue inherited from the Glue-managed source.
 
-| table | embucket | snowflake | ratio |
-|-------|----------|-----------|-------|
-| snowplow_web_page_views | 1,338,846 | 814,564 | 1.64× |
-| snowplow_web_sessions | 553,795 | 360,999 | 1.53× |
-| snowplow_web_users | 233,818 | 122,041 | 1.92× |
+### Scratch tables after batch 1 (essentially identical on both engines)
 
-### After batch 2
+| table | Embucket rows / distinct key | Snowflake rows / distinct key | dup ratio |
+|-------|------------------------------|-------------------------------|-----------|
+| snowplow_web_base_events_this_run | 2,834,944 / 2,700,579 event_id | 2,834,944 / 2,700,579 | 1.050 |
+| snowplow_web_page_views_this_run  | 814,555 / 775,543 page_view_id | 814,570 / 775,543 | 1.050 |
+| snowplow_web_sessions_this_run    | 360,999 / 317,162 domain_sessionid | 360,999 / 317,162 | 1.138 |
 
-| table | embucket | snowflake | notes |
-|-------|----------|-----------|-------|
-| snowplow_web_page_views | 2,370,157 | 814,564 | **Snowflake unchanged** — batch 2 incremental did not advance |
-| snowplow_web_sessions | 1,099,618 | 360,999 | **Snowflake unchanged** |
-| snowplow_web_users | 15,437,123 | 122,041 | Embucket 15.4M >> 6.16M input events — suspicious |
+Pre-merge state is byte-equivalent across engines.
 
-## Interpretation
+### Derived tables diverge in MERGE behavior
 
-1. Snowflake batch-2 run rebuilt `_this_run` scratch tables but did not
-   advance `snowplow_web_{page_views,sessions,users}`. The
-   `snowplow_web_incremental_manifest` rows for those models show
-   `last_success = 2026-04-22 15:26:32` both before and after the batch-2
-   run, while all scratch models advanced to 15:56:33. Likely cause: the
-   `snowplow_utils.is_run_with_new_events('snowplow_web')` guard evaluated
-   false despite new data being present. Worth isolating; not a harness bug.
+- **Snowflake** fails loudly: `100090 (42P18): Duplicate row detected
+  during DML action` on `snowplow_web_page_views` and
+  `snowplow_web_sessions` merges. ANSI MERGE cannot match multiple
+  source rows to one target row when two source rows share the
+  unique_key.
+- **Embucket** succeeds silently. Final derived tables retain the
+  duplicates from the scratch:
 
-2. Embucket batch-2 produced 15.4M user rows against 6.16M input events —
-   more rows than input. Likely unique-key collision or duplicated merge
-   in the users incremental. Needs engine-side investigation.
+| table | rows | distinct unique_key | dup ratio |
+|-------|------|---------------------|-----------|
+| demo.atomic_derived.snowplow_web_page_views | 814,555 | 775,543 page_view_id | 1.050 |
+| demo.atomic_derived.snowplow_web_sessions   | 360,999 | 317,162 domain_sessionid | 1.138 |
 
-3. Source parity is byte-for-byte between Embucket and Snowflake, so the
-   divergence is purely in the dbt model execution, not in how the two
-   engines read the Iceberg data.
+This contradicts the model config `unique_key='page_view_id'`
+(`domain_sessionid` for sessions) -- Embucket's incremental MERGE is
+not deduplicating by unique_key.
 
-## Harness status
+## Findings
 
-Working as intended. The comparison flow (init → setup → insert → refresh
-→ dbt × 2 → parity) runs end-to-end on fresh infrastructure and surfaces
-the divergences cleanly. No blockers.
+1. **Glue source has ~4.7% duplicate event_ids**. Snowplow assumes the
+   atomic layer is deduplicated upstream; this source violates that
+   contract.
+2. **Embucket adapter bug: incremental MERGE ignores unique_key when
+   the source has duplicates**. Snowflake errors correctly; Embucket
+   silently lets duplicate rows through to the derived layer. Worth
+   filing upstream.
+3. **Snowflake strict-MERGE behavior** is surfacing what is really a
+   source data quality problem. Snowplow Web doesn't have a global
+   pre-merge `distinct on unique_key` -- the scratch pipelines assume
+   the atomic-level dedup already happened.
+
+## Reproducing
+
+From a clean state (both engines' derived/scratch/manifest schemas
+dropped, iceberg source table dropped):
+
+```bash
+uv run python scripts/load_from_glue.py init
+uv run python scripts/snowflake_setup.py
+uv run python scripts/load_from_glue.py insert \
+  --start '2026-04-22 15:00:00' --end '2026-04-22 15:30:00'
+uv run python scripts/snowflake_refresh.py
+uv run dbt seed --profiles-dir . --target dev
+uv run dbt seed --profiles-dir . --target snowflake
+uv run dbt run --profiles-dir . --target dev         # 31 PASS
+uv run dbt run --profiles-dir . --target snowflake   # 2 errors on MERGE
+```
+
+Scratch counts can be read from either engine:
+```sql
+SELECT COUNT(*), COUNT(DISTINCT page_view_id)
+FROM <engine>.atomic_scratch.snowplow_web_page_views_this_run;
+```
+
+Source dup rate from Athena:
+```sql
+SELECT COUNT(*), COUNT(DISTINCT event_id)
+FROM analytics_glue.hooli_events_0417_v2
+WHERE load_tstamp >= TIMESTAMP '2026-04-22 15:00:00 UTC'
+  AND load_tstamp <  TIMESTAMP '2026-04-22 15:30:00 UTC';
+```
