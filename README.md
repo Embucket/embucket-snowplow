@@ -164,3 +164,68 @@ AWS S3 Table Bucket
 - **dbt-embucket** adapter calls Lambda directly via AWS IAM — no public endpoints
 - **Embucket** is a Snowflake-compatible query engine built on Apache DataFusion + Apache Iceberg
 - Data is stored as Iceberg tables in your S3 Table Bucket
+
+## Comparing Embucket vs Snowflake
+
+Runs dbt-snowplow-web on both engines against the same S3 Tables Iceberg
+source (loaded in two 30-minute Athena batches) and diffs the three
+headline derived tables after each run to surface semantic drift.
+
+Prerequisites:
+- `~/.snowflake/connections.toml` has a `[connections.default]` entry with
+  credentials for an account where you have ACCOUNTADMIN (or a role that
+  can create catalog integrations and iceberg tables).
+- IAM role `snowflake-table-bucket-access` has `glue:Get*` on
+  `arn:aws:glue:us-east-2:<account>:catalog/s3tablescatalog/snowplow` and
+  `s3tables:*` on the snowplow bucket.
+- Lake Formation `DESCRIBE` + `SELECT` granted to that role on
+  `s3tablescatalog/snowplow.atomic.events_0416` (grant once after the
+  first `load_from_glue.py init`):
+  ```bash
+  aws lakeformation grant-permissions \
+    --principal DataLakePrincipalIdentifier=arn:aws:iam::767397688925:role/snowflake-table-bucket-access \
+    --resource '{"Table":{"CatalogId":"767397688925:s3tablescatalog/snowplow","DatabaseName":"atomic","Name":"events_0416"}}' \
+    --permissions DESCRIBE SELECT
+  ```
+- `profiles.yml` has a `snowflake` output under `embucket_demo.outputs`
+  (see `profiles.yml.example`).
+
+Run flow:
+
+```bash
+# 1. One-time Snowflake setup (catalog integration + iceberg table)
+uv run python scripts/snowflake_setup.py
+
+# 2. Reset the shared Athena-managed source table
+uv run python scripts/load_from_glue.py init
+
+# 3. Load batch 1
+uv run python scripts/load_from_glue.py insert \
+  --start '2026-04-22 15:00:00' --end '2026-04-22 15:30:00'
+
+# 4. Run dbt on both engines (Snowflake needs a metadata refresh first)
+uv run dbt run --profiles-dir . --target dev
+uv run python scripts/snowflake_refresh.py
+uv run dbt run --profiles-dir . --target snowflake
+
+# 5. Parity check
+uv run python scripts/parity.py   # exits 0 on zero diffs
+
+# 6. Load batch 2 (append, do not re-init)
+uv run python scripts/load_from_glue.py insert \
+  --start '2026-04-22 15:30:00' --end '2026-04-22 16:00:00'
+
+# 7. Second dbt run exercises the incremental path
+uv run dbt run --profiles-dir . --target dev
+uv run python scripts/snowflake_refresh.py
+uv run dbt run --profiles-dir . --target snowflake
+
+# 8. Parity check again
+uv run python scripts/parity.py
+```
+
+A non-zero exit from `parity.py` means the engines produced different
+output on the same input — that's the interesting signal the harness
+exists to surface. Rowcount-only mismatches hint at incremental-window or
+JOIN semantics divergence; hash mismatches with matching rowcounts hint at
+cast, NULL, or ordering divergence.
