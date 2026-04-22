@@ -60,6 +60,47 @@ duplicates and the target now populated:
   Embucket page_views = 1.34M vs Snowflake 814K -- two dbt runs amplified
   Embucket's duplicate count).
 
+## Deep column-level parity (parity_deep.py)
+
+With seeds loaded on both engines and a single clean `dbt run` each
+(31 PASS both), `scripts/parity_deep.py` computes server-side
+aggregates per headline table:
+row count, distinct natural-key count, MIN/MAX `start_tstamp` (cast to
+epoch microseconds so engine timestamp-serialization differences don't
+masquerade as content divergence), 4-5 numeric SUMs, and 16 order-
+independent row-MD5 checksums (one per hex position). Results:
+
+| table | rowcount | distinct natural key | min/max start | md5 checksums | selected SUMs |
+|-------|----------|----------------------|---------------|---------------|---------------|
+| snowplow_web_page_views | **+12 on Snowflake** (814,547 vs 814,559) | **equal** (775,543 both) | equal | all 16 drift ~0.03% | sum_engaged: +180 sec (0.001%); sum_absolute_time: +1.27% on Embucket; sum_doc_height/width: drift < 0.003% |
+| snowplow_web_sessions   | equal (360,999 both) | equal (317,162 both) | equal | all 16 drift ~0.1% | sum_absolute_time: -0.86% on Snowflake |
+| snowplow_web_users      | +12,056 on Embucket (134,097 vs 122,041) | **equal** (71,352 both) | equal | drift ~9% | sum_engaged/page_views/sessions scale with the +9.9% row excess on Embucket |
+
+**Interpretation**:
+
+1. **Same content, different duplicate multiplicity.** Distinct
+   natural-key counts match exactly on every table. Distinct
+   `(key, absolute_time, engaged_time, page_views_in_session)` tuple
+   count also matches (775,543 on both for page_views). So the two
+   engines identified the same set of page views / sessions / users,
+   produced the same attribute values for each, but copied some of
+   those rows into the derived tables a different number of times
+   during the scratch→derived CTAS step. This is an artifact of the
+   non-deduplicating `_this_run → derived` path running over a source
+   that has duplicate event_ids.
+
+2. **±1 second rounding on `absolute_time_in_s`** for individual rows.
+   Spot-checked session `7da3c35f-5565-4903-88df-bb3c19a918f9`:
+   Embucket 231, Snowflake 230, all other columns identical.
+   Spot-checked page_view `00005058-c0e9-4e2a-8c2a-24db2e1f8fa4`:
+   Embucket 40, Snowflake 39, other columns identical.
+   Consistent with different integer-truncation of second-level
+   timestamp subtraction between the two engines.
+
+3. **Tiny md5-position drift with matching distinct-key counts** is the
+   hash signature of (1)+(2) combined; it is not independent evidence
+   of more divergence.
+
 ## Findings
 
 1. **Glue source has ~4.7% duplicate event_ids**. Snowplow assumes the
