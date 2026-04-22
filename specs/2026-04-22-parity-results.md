@@ -96,6 +96,35 @@ against `snowplow_web_base_sessions_this_run`.
 
 Snowflake ran to completion on the same source: `Done. PASS=20`.
 
+## 1/10 source scale (323,559 events, 3-min window)
+
+Both engines complete cleanly (20 PASS each) at this size -- Embucket
+no longer OOMs. Parity picture at this scale is much tighter:
+
+- **Rowcounts match exactly** on all three derived tables.
+- **Distinct natural-key counts match exactly.**
+- **SUMs of all tracked metrics match on users** (page_views, sessions,
+  engaged_time_in_s identical).
+- **Only remaining numeric divergence**: `sum_absolute_time_in_s` off
+  by 1.24% on page_views and 0.81% on sessions -- the same per-row
+  ±1-second rounding seen earlier, scaled down.
+- **Users table referrer column diverges on NULL-fill**: 12,585
+  non-null referrers on Snowflake vs 12,346 on Embucket (18 distinct
+  values on both). Root-caused in the compiled
+  `snowplow_web_users_this_run` -- `first_domain_sessionid` is
+  computed via `MAX(case when start_tstamp = user_start_tstamp then
+  domain_sessionid end)`. When two sessions for the same user share
+  `start_tstamp` (tie), `MAX(domain_sessionid)` resolves to a different
+  UUID ordering on each engine, picking a different first session whose
+  referrer value may be NULL or populated. 239 users (~2%) affected.
+
+At 2.83M rows the same effects are magnified (rowcount drifts by
+thousands on users, SUMs drift ~10%) and Embucket OOMs the
+`snowplow_web_base_events_this_run` repartition. So the 2.83M
+divergence is best understood as: same root-cause pipelines, but at
+scale the Embucket engine runs out of memory before completion,
+and the duplicate-row drift is amplified.
+
 ## Deep column-level parity (parity_deep.py)
 
 With seeds loaded on both engines and a single clean `dbt run` each
