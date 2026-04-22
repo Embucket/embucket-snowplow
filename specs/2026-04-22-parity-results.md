@@ -60,6 +60,42 @@ duplicates and the target now populated:
   Embucket page_views = 1.34M vs Snowflake 814K -- two dbt runs amplified
   Embucket's duplicate count).
 
+## Fresh-`dbt deps` re-run (no patch, then with patch)
+
+After running `dbt deps` from scratch (prior modified copy preserved as
+`dbt_packages.bak.1776896708/`) on the same batch-1 source:
+
+**Without `patch_snowplow.sh`** the Embucket target fails immediately at
+compile time:
+```
+Compilation Error in model snowplow_web_page_views
+  Snowplow: Unexpected target type embucket
+  > in macro get_value_by_target_type
+```
+Confirms why the patch exists: `snowplow_utils` has explicit
+`target.type` branches (snowflake/bigquery/databricks/postgres/redshift/
+spark) and errors out on anything else.
+
+**With `patch_snowplow.sh`** applied (rewrites `target.type == 'snowflake'`
+to `target.type in ['snowflake','embucket']` so Embucket dispatches to
+the Snowflake-flavored models), Embucket now hits a **memory OOM** on
+the biggest scratch model:
+```
+Failure in model snowplow_web_base_events_this_run
+  Database Error
+  Resources exhausted: Failed to allocate additional 5.4 MB for
+  RepartitionExec[2] with 5.1 MB already allocated for this
+  reservation - 3.1 MB remain available for the total pool
+```
+All 12 downstream models SKIP; only the 7 pre-scratch models succeed.
+Lambda config at the time: 10 GB function memory, `MEM_POOL_SIZE_MB=9216`,
+`DISK_POOL_SIZE_MB=10240` (spill enabled), `MEM_POOL_TYPE=greedy`. 2.83M
+rows × ~130 columns (including the 7 JSON-context VARIANT columns)
+still exhaust DataFusion's pool during the repartition for the JOIN
+against `snowplow_web_base_sessions_this_run`.
+
+Snowflake ran to completion on the same source: `Done. PASS=20`.
+
 ## Deep column-level parity (parity_deep.py)
 
 With seeds loaded on both engines and a single clean `dbt run` each
