@@ -118,6 +118,42 @@ no longer OOMs. Parity picture at this scale is much tighter:
   UUID ordering on each engine, picking a different first session whose
   referrer value may be NULL or populated. 239 users (~2%) affected.
 
+### After batch 2 at 1/10 scale (MERGE path engaged)
+
+Second load: 286,112 rows at 15:15 load_tstamp burst, total source
+now 609,671 rows. Both engines: `dbt run` 20 PASS.
+
+- Rowcounts + distinct keys still match exactly on all three
+  derived tables (35,094 users / 35,094 distinct domain_userid on
+  both; page_views and sessions also equal).
+- `sum_absolute_time_in_s` drift on page_views / sessions compounds
+  with the same ±1-sec-per-row pattern.
+- **Users table: 3,164 of 35,094 users (9%) have diverging
+  aggregates, all in the same direction -- Snowflake accumulates
+  more.** `sum_engaged_time_in_s` +6.4% on Snowflake,
+  `sum_page_views` +6.4%, `sum_sessions` +6.5%. Direction check:
+  `sf_aggregate_larger=3164 emb_aggregate_larger=0`.
+
+Example users where batch 1 activity is visible on Snowflake but not
+Embucket:
+```
+2696ac4b-...: emb=(1 pv, 1 sess, 15 eng)   sf=(2 pv, 2 sess, 15 eng)
+eeb8f559-...: emb=(27 pv, 9 sess, 415 eng) sf=(39 pv, 16 sess, 535 eng)
+```
+
+Snowplow's users incremental model MERGEs via `update set col = source.col`
+(row-replace), so the source `snowplow_web_users_this_run` must itself
+contain cumulative batch-1+batch-2 aggregates per user for cross-batch
+users. Snowflake's scratch pipeline is producing that cumulative row;
+Embucket's is producing a batch-2-only row, losing the prior batch's
+counts on the target update. Root cause is most likely in how
+`snowplow_web_base_sessions_this_run` computes the lookback window
+(which sessions from the manifest get re-aggregated against new
+events) -- worth drilling into on its own, but outside this
+investigation's scope.
+
+### 2.83M scale comparison
+
 At 2.83M rows the same effects are magnified (rowcount drifts by
 thousands on users, SUMs drift ~10%) and Embucket OOMs the
 `snowplow_web_base_events_this_run` repartition. So the 2.83M
