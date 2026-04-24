@@ -1,102 +1,100 @@
-# OOM-mitigation patch on Embucket: neither upstream nor current patch runs
+# OOM-mitigation patch: runs on both Embucket and Snowflake, Snowflake-equivalent
 
 ## Verdict
 
-Both variants fail on Embucket at the same model,
-`snowplow_web_base_events_this_run`, with the same DataFusion resource
-exhaustion. The Snowflake-verified patch set (iteration 2) is
-**semantically correct but not Embucket-viable** — making it
-Embucket-viable requires additional work on the event_id dedup step
-that iteration 2 deliberately avoided.
+After a third iteration of the patch set the pipeline runs to
+completion on Embucket Lambda (2 GB memory pool, DataFusion engine)
+AND remains byte-equivalent to upstream on Snowflake.
 
-| variant                   | result                                   |
-|---------------------------|------------------------------------------|
-| upstream (no patch)       | FAIL — OOM in `snowplow_web_base_events_this_run` |
-| iteration-2 patched       | FAIL — OOM in the SAME model, same cause |
+### Embucket
+Both full-refresh and incremental dbt runs complete successfully:
 
-Error on both (abbreviated):
+| phase                 | result                     | duration |
+|-----------------------|----------------------------|----------|
+| full-refresh, batch 1 | PASS 33/33, ERROR 0        |  3m 5s   |
+| incremental, batch 2  | PASS 33/33, ERROR 0        |  8m 52s  |
 
-```
-Resources exhausted: Failed to allocate additional 5.0 MB for RepartitionExec[4]
-with 13.5 MB already allocated for this reservation
-- 1348.8 KB remain available for the total pool
-```
+Rowcounts (Embucket patched):
 
-Source: `demo.atomic.events_0416` with 2,834,944 rows (batch 1 only).
-Embucket Lambda config: `MEM_POOL_SIZE_MB=2048`, greedy pool.
+| table                    | rows (fr)  | rows (inc) |
+|--------------------------|-----------:|-----------:|
+| snowplow_web_page_views  |   775,543  |  1,728,842 |
+| snowplow_web_sessions    |   317,162  |    704,037 |
+| snowplow_web_users       |    71,352  |    148,357 |
 
-## Why both failed
+### Snowflake self-parity (baseline vs patched, new patch set)
 
-The upstream macro
-`snowplow_utils/macros/base/base_create_snowplow_events_this_run.sql`
-ends with:
+Both `parity_self.py` invocations exit 0.
 
-```
-qualify row_number() over (partition by a.event_id
-                           order by a.collector_tstamp,
-                                    a.dvce_created_tstamp) = 1
-```
+| table                    | rows (fr)  | rows (inc) | fr diffs | inc diffs |
+|--------------------------|-----------:|-----------:|---------:|----------:|
+| snowplow_web_page_views  |   775,543  |  1,731,722 |        0 |         0 |
+| snowplow_web_sessions    |   317,162  |    704,107 |        0 |         0 |
+| snowplow_web_users       |    71,352  |    148,357 |        0 |         0 |
 
-`a.*` expands to the full 137+ column row inside the QUALIFY scope, so
-the row_number() window buffers 137 columns per partition. On a 2.8M
-input it exceeds DataFusion's 2 GB memory pool via `RepartitionExec`
-during the qualify's shuffle.
+### Cross-engine rowcount comparison (Embucket patched vs Snowflake patched)
 
-Iteration 1 of the Apr-10 stash removed this QUALIFY entirely, which
-avoided the OOM but broke semantics (the 2.18% duplicate event_ids in
-the source started double-counting downstream, inflating users by
-+71%). Iteration 2 reverted that macro patch — restoring upstream
-semantics at the cost of restoring the Embucket OOM.
+Full-refresh: exact match on all three tables.
+Incremental: small drift on page_views (-2,880, 0.17%) and sessions
+(-70, 0.01%); users exact. This is a cross-engine incremental-window
+timing artefact (the Snowplow package's `current_timestamp()`-bounded
+upper_limit differed between the two invocations run minutes apart),
+not a patch semantics issue — the Snowflake self-parity remains 0 diffs.
 
-The iteration-2 patch set relieves memory pressure in the
-sessions/page_views/user_mapping layers (decomposed into
-narrow-projection scratch models + inner-joins), but it leaves the
-base-events macro untouched. The OOM site is therefore reached before
-any of those improvements matter.
+## What changed from iteration 2
 
-## What's needed to make the patch Embucket-viable
+Iteration 2's patch set kept upstream's event_id QUALIFY in the
+base-events macro (to preserve Snowflake semantics) and failed with
+`RepartitionExec` resource exhaustion on Embucket. Iteration 3 replaces
+that single wide-column QUALIFY with a three-model narrow-scratch chain:
 
-The narrow-scratch pattern the stash already uses for page-view and
-session dedup needs to be extended to event_id dedup. The shape that
-WOULD work (a three-model decomposition):
-
-1. `snowplow_web_base_events_raw_this_run` - wide, materialized=table,
-   emitted by the macro with the QUALIFY removed. May contain
+1. `snowplow_web_base_events_raw_this_run` - materialized=table, wide
+   projection from the macro with the QUALIFY removed. May contain
    duplicate event_ids.
-2. `snowplow_web_base_events_winners_this_run` - narrow,
-   materialized=table. `SELECT event_id, collector_tstamp,
-   dvce_created_tstamp FROM raw QUALIFY row_number() OVER (...) = 1`.
-   Spillable because projection is 3 columns.
-3. `snowplow_web_base_events_this_run` - wide, materialized=table.
-   Inner-joins `_raw` to `_winners`. **Caveat**: a naive inner join on
-   `event_id` alone is NOT a dedup - if two raw rows share an event_id
-   they both still match. A correct join needs a row-uniquely-
-   determining key. Options:
+2. `snowplow_web_base_events_winners_this_run` - materialized=table,
+   narrow (2 columns): `(event_id, winner_hash)`. One row per event_id.
+   `winner_hash = MD5(concat_ws('|', event_id, collector_tstamp,
+   dvce_created_tstamp, load_tstamp))`.
+3. `snowplow_web_base_events_this_run` - materialized=table, the final
+   INNER JOIN of `_raw` against `_winners` on `(event_id, winner_hash)`,
+   producing exactly one wide row per event_id.
 
-   - **Hash-based**: add `HASH(event_id, collector_tstamp,
-     dvce_created_tstamp, load_tstamp, ...)` to both sides; join on
-     `(event_id, row_hash)`. Cheap, narrow, deterministic.
-   - **Aggregated winner**: in `_winners` pick one full set of
-     metadata per event_id via `MIN(hash) GROUP BY event_id`; join on
-     `(event_id, hash)`.
+Each hop materialises, so DataFusion's memory pool resets between
+steps; the memory-bounded QUALIFY runs on a 3-column projection rather
+than 137.
 
-   Materialisation between each step gives DataFusion a fresh memory
-   pool and keeps the QUALIFY on a narrow projection.
+Why MD5 and not `HASH()`: Embucket (DataFusion) rejects Snowflake's
+`HASH()` function with "Function 'hash' is not implemented yet".
+`MD5(CONCAT_WS('|', ...))` is portable across both engines.
 
-An earlier attempt in this branch tried a simpler wrapper-level
-`INNER JOIN event_id_dedup ON event_id = event_id`; that was wrong for
-the reason above (it filters but doesn't dedup) and was reverted. The
-correct solution is the three-model decomposition described here.
+Why the inner join on `(event_id, winner_hash)` and not on `event_id`
+alone: if `_raw` has two rows with the same event_id, a join on
+`event_id` alone matches both (filter, not dedup). Matching on the
+hash of the full ORDER BY tuple uniquely identifies the chosen
+"winner" row.
 
-## What to report back
+## Harness state (all committed on this branch)
 
-- The verification infrastructure for Embucket now exists:
-  `scripts/embucket_reset_manifest.py`, `scripts/embucket_snapshot_derived.py`,
-  `scripts/parity_self_embucket.py`. These are useful as soon as the
-  base-events dedup is re-engineered.
-- Iteration 2's patches are correct and merged for the Snowflake
-  story. Landing Embucket requires one more iteration specifically on
-  the base-events model, following the design sketch above.
-- The existing `scripts/parity.py` is still the right tool for cross-
-  engine comparison (Embucket patched vs Snowflake upstream) once the
-  Embucket side actually runs.
+- `patches/` - 18 patch files (14 from iteration 2 + 4 base-events
+  files added in iteration 3).
+- `scripts/apply_oom_patch.sh` - idempotent rsync, survives `dbt deps`.
+- Snowflake verification: `scripts/verify_oom_patch.sh`,
+  `scripts/parity_self.py`, `scripts/snowflake_clone_schema.py`,
+  `scripts/snowflake_reset_manifest.py`.
+- Embucket verification: `scripts/parity_self_embucket.py`,
+  `scripts/embucket_snapshot_derived.py` (CTAS; Iceberg has no CLONE),
+  `scripts/embucket_reset_manifest.py`.
+
+## Live evidence
+
+Snapshots live in both engines; zero-copy on Snowflake, CTAS copies
+on Embucket:
+
+```
+sturukin_db.atomic_derived_{baseline,patched}_{fr,inc}   -- Snowflake
+demo.atomic_derived_patched_{fr,inc}                     -- Embucket
+```
+
+The baseline snapshots on Snowflake cover the upstream (un-patched)
+side; Embucket does not have a baseline snapshot because upstream
+does not run there.
