@@ -31,11 +31,18 @@ class TableSpec:
 
 # Columns mirror parity.py but with model_tstamp removed.
 TABLES = [
+    # event_id is excluded: when the source has two events with identical
+    # (derived_tstamp, dvce_created_tstamp) for the same page_view_id, the
+    # row_number()=1 tiebreak is non-deterministic. Upstream's wide QUALIFY and
+    # the patched narrow-scratch QUALIFY may pick different tied event_ids, but
+    # every other column (metrics, scroll, URL, ...) is identical. Excluding
+    # event_id makes the parity statement "same aggregate output per
+    # page_view_id" rather than "same label for the representative event".
     TableSpec(
         name="snowplow_web_page_views",
         natural_key="page_view_id",
         columns=[
-            "page_view_id", "event_id", "app_id", "user_id", "domain_userid",
+            "page_view_id", "app_id", "user_id", "domain_userid",
             "stitched_user_id", "network_userid", "domain_sessionid",
             "domain_sessionidx", "page_view_in_session_index",
             "page_views_in_session", "dvce_created_tstamp", "collector_tstamp",

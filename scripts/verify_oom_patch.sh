@@ -52,6 +52,10 @@ reset_source() {
   # After Athena drops + recreates events_0416 its S3 Tables location changes,
   # so we must re-register the Snowflake iceberg table and re-grant LF perms.
   uv run python scripts/snowflake_setup.py
+  # Reset Snowplow package state (incremental manifest + session lifecycle)
+  # so the next run processes events from scratch. --full-refresh on dbt does
+  # not touch these tables by default.
+  uv run python scripts/snowflake_reset_manifest.py
   load_batch "$BATCH1_START" "$BATCH1_END"
 }
 
